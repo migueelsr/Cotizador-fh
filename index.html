@@ -809,7 +809,8 @@ const DEFAULTS = {
     elec:256.2, waterBase:2241, waterAdj:0.05, wear:500, cons:1200,
     margin:0.22, iva:0.19, round:1000,
     gas:1618, genL:1, genFrac:0.5, genPrice:850990, genLife:2000, genMaint:300,
-    tank:130000, pump:80000, amortMonths:48, servMonth:15, tankCap:220
+    tank:130000, pump:80000, amortMonths:48, servMonth:15, tankCap:220,
+    minTapiz:40000, minPrizm:30000, minMotor:40000, specExtra:0
   },
   vehicles: [
     {id:'citycar', name:'Citycar', short:'Citycar', g:'auto', h:6, chem:.75, water:.75, elec:.8, tapiz:.8, vid:.75, motor:.9, ref:'Auto pequeño, 4-5 asientos'},
@@ -864,9 +865,9 @@ function matrixRow(v, n, p, S){
   const I = D*d.hb;
   const J = E+F+G+H+I;
   const sT = S.tapiz.h*v.tapiz*n.t, sP = S.vid.h*v.vid*n.t, sM = S.motor.h*v.motor*n.t;
-  const L = sT*d.hw + S.tapiz.chem*v.tapiz*n.chem + S.tapiz.kwh*p.elec*(sT/S.tapiz.h) + S.tapiz.L/1000*w*(sT/S.tapiz.h) + S.tapiz.cons*v.tapiz;
-  const N = sP*d.hw + S.vid.chem*v.vid*n.chem + S.vid.L/1000*w*v.vid + S.vid.cons*v.vid;
-  const P = sM*d.hw + S.motor.chem*v.motor*n.chem + S.motor.kwh*p.elec*(sM/S.motor.h) + S.motor.L/1000*w*v.motor*n.water + S.motor.cons*v.motor;
+  const L = sT*d.hw + S.tapiz.chem*v.tapiz*n.chem + S.tapiz.kwh*p.elec*(sT/S.tapiz.h) + S.tapiz.L/1000*w*(sT/S.tapiz.h) + S.tapiz.cons*v.tapiz + sT*p.specExtra;
+  const N = sP*d.hw + S.vid.chem*v.vid*n.chem + S.vid.L/1000*w*v.vid + S.vid.cons*v.vid + sP*p.specExtra;
+  const P = sM*d.hw + S.motor.chem*v.motor*n.chem + S.motor.kwh*p.elec*(sM/S.motor.h) + S.motor.L/1000*w*v.motor*n.water + S.motor.cons*v.motor + sM*p.specExtra;
   return {D,E,F,G,H,I,J,sT,sP,sM,L,N,P};
 }
 
@@ -880,12 +881,18 @@ function quote(q, p, S){
   const hM = q.motor ? (q.hMotor>0 ? q.hMotor : m.sM) : 0;
   const gRate = m.D ? m.G/m.D : 0;
   const cBase = m.J + (hA-m.D)*(d.hw + gRate);
-  const cTapiz = q.tapiz ? m.L + (hT-m.sT)*(d.hw + S.tapiz.kwh*p.elec/S.tapiz.h + S.tapiz.L/1000*d.water/S.tapiz.h) : 0;
-  const cPrizm = q.prizm ? m.N + (hP-m.sP)*d.hw : 0;
-  const cMotor = q.motor ? m.P + (hM-m.sM)*(d.hw + S.motor.kwh*p.elec/S.motor.h) : 0;
+  const cTapiz = q.tapiz ? m.L + (hT-m.sT)*(d.hw + p.specExtra + S.tapiz.kwh*p.elec/S.tapiz.h + S.tapiz.L/1000*d.water/S.tapiz.h) : 0;
+  const cPrizm = q.prizm ? m.N + (hP-m.sP)*(d.hw + p.specExtra) : 0;
+  const cMotor = q.motor ? m.P + (hM-m.sM)*(d.hw + p.specExtra + S.motor.kwh*p.elec/S.motor.h) : 0;
   const tras = +q.traslado||0, otros = +q.otros||0;
   const cost = cBase+cTapiz+cPrizm+cMotor+tras+otros;
-  const price = priceOf(cost, p);
+  // Precio: base + cada extra al mayor entre tarifa mínima profesional y piso de 22% + logística
+  const prices = { base: priceOf(cBase, p),
+    tapiz: q.tapiz ? Math.max(p.minTapiz, priceOf(cTapiz, p)) : 0,
+    prizm: q.prizm ? Math.max(p.minPrizm, priceOf(cPrizm, p)) : 0,
+    motor: q.motor ? Math.max(p.minMotor, priceOf(cMotor, p)) : 0,
+    log: priceOf(tras+otros, p) };
+  const price = prices.base + prices.tapiz + prices.prizm + prices.motor + prices.log;
   const hours = hA+hT+hP+hM;
   // Autonomía
   const genH = q.genManual>0 ? q.genManual : hours*p.genFrac;
@@ -896,12 +903,13 @@ function quote(q, p, S){
   const elecAvoided = m.G + (hA-m.D)*gRate + (q.tapiz ? S.tapiz.kwh*p.elec*hT/S.tapiz.h : 0) + (q.motor ? S.motor.kwh*p.elec*hM/S.motor.h : 0);
   const autInc = fuel+maint+amort-elecAvoided;
   const costAut = cost+autInc;
-  const priceAut = priceOf(costAut, p);
+  prices.aut = Math.max(0, priceOf(autInc, p));
+  const priceAut = price + prices.aut;
   const water = Math.round(S.base.L*q.v.water*q.n.water + (q.tapiz? S.tapiz.L*hT/S.tapiz.h:0) + (q.prizm? S.vid.L:0) + (q.motor? S.motor.L*hM/S.motor.h:0));
   const loads = Math.ceil(water/p.tankCap);
   const mk = (pr, c) => { const neto = pr/(1+p.iva); return {price:pr, cost:c, neto, ivaAmt:pr-neto, profit:neto-c, marginPct: neto? (neto-c)/neto : 0}; };
   return {
-    m, hA, hT, hP, hM, hours, sugg:{wash:m.D, tapiz:m.sT, prizm:m.sP, motor:m.sM},
+    m, hA, hT, hP, hM, hours, prices, sugg:{wash:m.D, tapiz:m.sT, prizm:m.sP, motor:m.sM},
     costs:{base:cBase, tapiz:cTapiz, prizm:cPrizm, motor:cMotor, traslado:tras, otros},
     cli: mk(price, cost), aut: mk(priceAut, costAut),
     gen:{hours:genH, liters, fuel, maint, amort, elecAvoided, inc:autInc},
@@ -969,16 +977,18 @@ function calc(){
   // Detalle por línea (precio con IVA por servicio) + descuento
   const d = Math.min(Math.max(+st.desc||0, 0), 90)/100;
   ['cli','aut'].forEach(mode=>{
-    const f = (1+P.iva)/(1-P.margin), q = r[mode];
-    const L = [{k:'wash', desc:`Lavado detallado interior + exterior (${dec(r.hA)} h)`, c:r.costs.base}];
-    if(st.tapiz) L.push({desc:`Limpieza profunda de tapiz (${dec(r.hT)} h)`, c:r.costs.tapiz});
-    if(st.prizm) L.push({desc:`Descontaminación vidrios Prizm (${dec(r.hP)} h)`, c:r.costs.prizm});
-    if(st.motor) L.push({desc:`Lavado de motor (${dec(r.hM)} h)`, c:r.costs.motor});
-    if(r.costs.otros) L.push({desc:'Insumos y costos adicionales', c:r.costs.otros});
-    if(mode==='aut') L.push({desc:'Servicio autónomo (agua y energía propias)', c:r.gen.inc});
-    if(r.costs.traslado) L.push({desc:'Traslado a domicilio', c:r.costs.traslado, noDisc:true});
-    L.forEach(x=>x.total = Math.round(x.c*f/100)*100);
-    L[0].total += q.price - L.reduce((a,x)=>a+x.total,0);   // el redondeo del total queda en el lavado base
+    const q = r[mode], pr = r.prices;
+    const L = [{desc:`Lavado detallado interior + exterior (${dec(r.hA)} h)`, total:pr.base}];
+    if(st.tapiz) L.push({desc:`Limpieza profunda de tapiz (${dec(r.hT)} h)`, total:pr.tapiz});
+    if(st.prizm) L.push({desc:`Descontaminación vidrios Prizm (${dec(r.hP)} h)`, total:pr.prizm});
+    if(st.motor) L.push({desc:`Lavado de motor (${dec(r.hM)} h)`, total:pr.motor});
+    if(mode==='aut' && pr.aut>0) L.push({desc:'Servicio autónomo (agua y energía propias)', total:pr.aut});
+    if(pr.log>0){
+      const t = r.costs.traslado, o = r.costs.otros;
+      const pO = o ? (t ? Math.round(pr.log*o/(t+o)/100)*100 : pr.log) : 0;
+      if(o) L.push({desc:'Insumos y costos adicionales', total:pO});
+      if(t) L.push({desc:'Traslado a domicilio', total:pr.log-pO, noDisc:true});
+    }
     L.forEach(x=>{ x.dp = x.noDisc?0:d; x.pay = Math.round(x.total*(1-x.dp)); });
     const total = L.reduce((a,x)=>a+x.total,0), pay = L.reduce((a,x)=>a+x.pay,0), neto = pay/(1+P.iva);
     Object.assign(q, {lines:L, gross:total, discAmt:total-pay, discPct:d, price:pay, neto, ivaAmt:pay-neto, profit:neto-q.cost, marginPct: neto?(neto-q.cost)/neto:0});
@@ -1033,10 +1043,11 @@ function render(){
     // precio marginal
     const pc = P.margin, ivaF = (1+P.iva)/(1-pc);
     const sp = $('#sp-'+s.k);
-    if(s.fixed){ sp.innerHTML = `${clp(priceOf(r.costs.base, P))}<small>con IVA</small>`; }
+    if(s.fixed){ sp.innerHTML = `${clp(r.prices.base)}<small>con IVA</small>`; }
     else {
-      const extraCost = on ? r.costs[s.k] : costIfOn(s.k);
-      sp.innerHTML = `+ ${clp(extraCost*ivaF)}<small>${on?'incluido':'aprox. con IVA'}</small>`;
+      const pk = on ? r.prices[s.k] : costIfOn(s.k);
+      const mins = {tapiz:P.minTapiz, prizm:P.minPrizm, motor:P.minMotor};
+      sp.innerHTML = `+ ${clp(pk)}<small>${pk===mins[s.k]?'tarifa mínima':(on?'incluido':'con IVA')}</small>`;
     }
   });
   $('#hrsAside').textContent = `${dec(r.hours)} h en total`;
@@ -1100,7 +1111,7 @@ function render(){
 function costIfOn(k){
   const v = VH.find(x=>x.id===st.veh), li = levelIndex(st.dirt.reduce((a,b)=>a+b,0));
   const r = quote({v, n:LV[li], tapiz:k==='tapiz', prizm:k==='prizm', motor:k==='motor', hTapiz:+st.h.tapiz||0, hPrizm:+st.h.prizm||0, hMotor:+st.h.motor||0}, P, S);
-  return r.costs[k];
+  return r.prices[k];
 }
 
 /* ---------- Mensaje ---------- */
@@ -1291,6 +1302,7 @@ const SETS = [
   {t:'Precio de venta', rows:[['margin','Margen sobre venta neta','% · sin IVA',100],['iva','IVA','%',100],['round','Redondeo del precio final','CLP hacia arriba',1]]},
   {t:'Mano de obra', rows:[['minWage','Ingreso mínimo mensual bruto','CLP',1],['weekly','Jornada semanal','h/semana',1],['sellable','Horas vendibles','% del tiempo',100],['reserve','Reserva de gestión y cargas','%',100]], derived:'hb'},
   {t:'Insumos y desgaste', rows:[['elec','Electricidad','CLP/kWh',1],['waterBase','Agua y alcantarillado','CLP/m³',1],['waterAdj','Ajuste tarifa agua','%',100],['wear','Desgaste / reposición equipos','CLP/h',1],['cons','Consumibles base sedán','CLP por lavado',1]]},
+  {t:'Servicios especializados', rows:[['minTapiz','Tarifa mínima tapiz','CLP con IVA',1],['minPrizm','Tarifa mínima vidrios Prizm','CLP con IVA',1],['minMotor','Tarifa mínima lavado de motor','CLP con IVA',1],['specExtra','Adicional hora especialista','CLP/h sobre la hora base',1]]},
   {t:'Autonomía: generador y estanque', rows:[['gas','Gasolina 93','CLP/litro',1],['genL','Consumo generador','L/h al 50%',1],['genFrac','Tiempo encendido','% de horas de lavado',100],['genPrice','Precio generador','CLP',1],['genLife','Vida útil generador','horas',1],['genMaint','Mantención generador','CLP/h',1],['tank','Estanque 220 L','CLP',1],['pump','Bomba, soportes, accesorios','CLP',1],['amortMonths','Amortización sistema agua','meses',1],['servMonth','Servicios por mes','servicios',1],['tankCap','Capacidad estanque','litros',1]]}
 ];
 function buildSettings(){
